@@ -31,6 +31,7 @@ import asyncio
 import logging
 import os
 import random
+import time
 from abc import ABC, abstractmethod
 from typing import Any, Optional
 from uuid import uuid4
@@ -501,6 +502,8 @@ class AgentLoopWorker:
             repetition_penalty=1.0,
             logprobs=config.calculate_log_probs,
         )
+        if getattr(config, "thinking_token_budget", None) is not None:
+            sampling_params["thinking_token_budget"] = config.thinking_token_budget
 
         def apply_greedy_sampling_params(params: dict[str, Any]) -> None:
             params["top_p"] = 1.0
@@ -512,6 +515,11 @@ class AgentLoopWorker:
             sampling_params["top_p"] = config.val_kwargs.top_p
             sampling_params["top_k"] = config.val_kwargs.top_k
             sampling_params["temperature"] = config.val_kwargs.temperature
+            val_budget = getattr(config.val_kwargs, "thinking_token_budget", None)
+            if val_budget is not None:
+                sampling_params["thinking_token_budget"] = val_budget
+            elif "thinking_token_budget" in sampling_params:
+                del sampling_params["thinking_token_budget"]
 
         # by default, we assume it's a single turn agent
         if "agent_name" not in batch.non_tensor_batch:
