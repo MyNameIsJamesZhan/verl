@@ -15,6 +15,9 @@
 import json
 import logging
 import os
+import shutil
+import tempfile
+import time
 import warnings
 from dataclasses import asdict, dataclass
 from typing import Optional
@@ -217,6 +220,50 @@ class FSDPCheckpointManager(BaseCheckpointManager):
         # wait for everyone to load checkpoints
         torch.distributed.barrier()
 
+    def _save_state_dict(self, obj, final_path: str):
+        """torch.save ``obj`` to ``final_path``.
+
+        With VERL_CKPT_LOCAL_STAGE set, write to node-local scratch first, then copy
+        the finished file to ``final_path`` with retries. torch.save's zip writer does
+        seek-heavy writes that intermittently fail on Lustre (basic_ios::clear /
+        "unexpected pos"); staging keeps the only Lustre write a plain sequential copy.
+        """
+        if not os.environ.get("VERL_CKPT_LOCAL_STAGE"):
+            torch.save(obj, final_path)
+            return
+
+        stage_dir = os.environ.get("VERL_CKPT_STAGE_DIR") or os.environ.get("SLURM_TMPDIR") or "/tmp"
+        os.makedirs(stage_dir, exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(prefix="verl_ckpt_", suffix=".pt", dir=stage_dir)
+        os.close(fd)
+        try:
+            torch.save(obj, tmp_path)
+            max_retries = int(os.environ.get("VERL_CKPT_COPY_RETRIES", "4"))
+            last_err = None
+            for attempt in range(1, max_retries + 1):
+                try:
+                    with open(tmp_path, "rb") as src, open(final_path, "wb") as dst:
+                        shutil.copyfileobj(src, dst, length=16 * 1024 * 1024)
+                        dst.flush()
+                        os.fsync(dst.fileno())
+                    return
+                except OSError as e:
+                    last_err = e
+                    log_with_rank(
+                        f"[ckpt-stage] copy to {final_path} failed (attempt {attempt}/{max_retries}): {e}",
+                        rank=self.rank,
+                        logger=logger,
+                    )
+                    time.sleep(2 * attempt)
+            raise RuntimeError(
+                f"[ckpt-stage] failed to copy staged checkpoint to {final_path} after {max_retries} attempts"
+            ) from last_err
+        finally:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+
     def save_checkpoint(self, local_path: str, hdfs_path: str = None, global_step: int = 0, max_ckpt_to_keep=None):
         """
         Save an FSDP checkpoint for this rank.
@@ -267,12 +314,12 @@ class FSDPCheckpointManager(BaseCheckpointManager):
 
                 if self.should_save_model:
                     model_state_dict = self.model.state_dict()
-                    torch.save(model_state_dict, model_path)
+                    self._save_state_dict(model_state_dict, model_path)
                     log_with_rank(f"Saved model to {os.path.abspath(model_path)}", rank=self.rank, logger=logger)
 
                 if self.should_save_optimizer:
                     optimizer_state_dict = self.optimizer.state_dict()
-                    torch.save(optimizer_state_dict, optim_path)
+                    self._save_state_dict(optimizer_state_dict, optim_path)
                     log_with_rank(f"Saved optim to {os.path.abspath(optim_path)}", rank=self.rank, logger=logger)
 
                 if self.should_save_extra:
@@ -281,7 +328,7 @@ class FSDPCheckpointManager(BaseCheckpointManager):
                         "lr_scheduler": lr_scheduler_state_dict,
                         "rng": self.get_rng_state(),
                     }
-                    torch.save(extra_state_dict, extra_path)
+                    self._save_state_dict(extra_state_dict, extra_path)
                     log_with_rank(f"Saved extra_state to {os.path.abspath(extra_path)}", rank=self.rank, logger=logger)
 
         if self.rank == 0:
