@@ -158,6 +158,37 @@ def _get_input_embeds(
     return {"inputs_embeds": inputs_embeds, "attention_mask": attention_mask}
 
 
+def _packed_seq_kwargs(position_ids: torch.Tensor) -> dict:
+    """Derive packed-sequence boundary metadata for the Qwen3.5 linear-attention (GDN)
+    fast path under remove_padding.
+
+    transformers >= 5.9 (PR #45034) reads ``cu_seq_lens_q`` (-> chunk_gated_delta_rule
+    ``cu_seqlens``) and ``seq_idx`` (-> causal_conv1d_fn) from the GDN layer kwargs, but
+    no verl caller fills them, so packing silently bleeds recurrent state across sequence
+    boundaries. We reconstruct them from the rmpad ``position_ids`` (which reset to 0 at
+    each sequence start). No-op for padded (non-rmpad) inputs.
+    """
+    # rmpad format: [1, total_nnz] or mrope [n, 1, total_nnz] -> use the text row
+    pos = position_ids[-1] if position_ids.dim() == 3 else position_ids
+    if pos.shape[0] != 1:
+        return {}  # padded (non-rmpad) mode: nothing to do
+    pos = pos.reshape(-1)
+    starts = (pos == 0).nonzero(as_tuple=True)[0]  # sequence boundaries
+    cu = torch.cat([starts, pos.new_tensor([pos.numel()])]).to(torch.int32)
+    lens = cu[1:] - cu[:-1]
+    max_len = int(lens.max())
+    seq_idx = torch.repeat_interleave(
+        torch.arange(len(lens), device=pos.device, dtype=torch.int32), lens
+    ).unsqueeze(0)
+    return {
+        "cu_seq_lens_q": cu,  # -> GDN chunk kernel cu_seqlens (+ flash-attn)
+        "cu_seq_lens_k": cu,
+        "max_length_q": max_len,
+        "max_length_k": max_len,
+        "seq_idx": seq_idx,  # -> causal_conv1d per-sequence boundary reset
+    }
+
+
 def qwen3_5_base_forward(
     self: "Qwen3_5ForConditionalGeneration",
     input_ids: torch.LongTensor,
@@ -172,6 +203,10 @@ def qwen3_5_base_forward(
         self, input_ids, attention_mask, pixel_values, pixel_values_videos, image_grid_thw, video_grid_thw
     )  # avoid lora module having multiple keyword arguments
     kwargs.update(input_kwargs)
+    # remove_padding: feed packed boundaries to the GDN/linear-attn fast path. rmpad sets
+    # attention_mask=None; padded mode keeps a mask (and _packed_seq_kwargs no-ops anyway).
+    if input_kwargs.get("attention_mask") is None and (pids := kwargs.get("position_ids")) is not None:
+        kwargs.update(_packed_seq_kwargs(pids))
     return self.language_model(
         input_ids=None,
         **kwargs,
