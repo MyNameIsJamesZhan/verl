@@ -1518,6 +1518,8 @@ class RayPPOTrainer:
                     with marked_timer("reward", timing_raw, color="yellow"):
                         # compute reward model score
                         if self.use_rm and "rm_scores" not in batch.batch.keys():
+                            # Expose the current step to step-aware reward managers.
+                            batch.meta_info["global_steps"] = self.global_steps
                             batch_reward = self._compute_reward_colocate(batch)
                             batch = batch.union(batch_reward)
 
