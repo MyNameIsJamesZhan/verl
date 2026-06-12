@@ -191,6 +191,19 @@ trainer:
   # Maximum number of critic checkpoints to keep
   max_critic_ckpt_to_keep: null
 
+  # Early stopping: stop training if the averaged benchmark validation score
+  # (mean over all val-core/<data_source>/{acc|reward}/mean@N keys) does not
+  # improve for this many consecutive checkpoint-save rounds. null disables.
+  early_stop_tolerance: null
+
+  # Minimum score increase that counts as an improvement for early stopping.
+  early_stop_min_delta: 0.0
+
+  # When true, after each checkpoint-save round keep only the latest and the
+  # best (highest averaged benchmark score) global_step_* checkpoints; prune the
+  # rest. Leave max_actor_ckpt_to_keep null when this is on.
+  keep_best_and_latest_ckpt: False
+
   # Timeout (in seconds) for Ray worker to wait for registration
   ray_wait_register_center_timeout: 300
 

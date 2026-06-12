@@ -1040,6 +1040,112 @@ class RayPPOTrainer:
         with open(local_latest_checkpointed_iteration, "w") as f:
             f.write(str(self.global_steps))
 
+    def _avg_benchmark_val_score(self, val_metrics):
+        """Average the per-benchmark core validation reward.
+
+        Returns the mean over all ``val-core/<data_source>/{acc|reward}/mean@N``
+        keys (the composite RL reward per benchmark), or None if none present.
+        Drives best-checkpoint selection and early stopping (see ppo_trainer.yaml).
+        """
+        import re
+
+        pat = re.compile(r"^val-core/[^/]+/(?:acc|reward)/mean@\d+$")
+        scores = [float(v) for k, v in val_metrics.items() if pat.match(k)]
+        if not scores:
+            return None
+        return sum(scores) / len(scores)
+
+    def _best_ckpt_state_path(self):
+        return os.path.join(self.config.trainer.default_local_dir, "best_ckpt_state.json")
+
+    def _load_best_ckpt_state(self):
+        """Restore best-checkpoint / early-stop bookkeeping across resume so a
+        previously recorded best checkpoint is not pruned by a later run."""
+        self._best_val_score = None
+        self._best_global_step = None
+        self._early_stop_no_improve = 0
+        path = self._best_ckpt_state_path()
+        if os.path.exists(path):
+            try:
+                with open(path) as f:
+                    state = json.load(f)
+                self._best_val_score = state.get("best_val_score")
+                self._best_global_step = state.get("best_global_step")
+                self._early_stop_no_improve = state.get("no_improve_rounds", 0)
+                print(f"Restored best-ckpt state: {state}")
+            except (json.JSONDecodeError, OSError) as e:
+                print(f"Could not read best-ckpt state ({e}); starting fresh")
+
+    def _save_best_ckpt_state(self):
+        from verl.utils.fs import local_mkdir_safe
+
+        local_mkdir_safe(self.config.trainer.default_local_dir)
+        state = {
+            "best_val_score": self._best_val_score,
+            "best_global_step": self._best_global_step,
+            "no_improve_rounds": self._early_stop_no_improve,
+        }
+        with open(self._best_ckpt_state_path(), "w") as f:
+            json.dump(state, f)
+
+    def _keep_best_and_latest_checkpoints(self):
+        """Prune global_step_* checkpoint dirs, keeping only the latest and the
+        best (highest averaged benchmark score). Never forces a new save."""
+        import glob
+        import shutil
+
+        keep = {self.global_steps}
+        if self._best_global_step is not None:
+            keep.add(int(self._best_global_step))
+        for d in glob.glob(os.path.join(self.config.trainer.default_local_dir, "global_step_*")):
+            if not os.path.isdir(d):
+                continue
+            try:
+                step = int(os.path.basename(d).rsplit("_", 1)[-1])
+            except ValueError:
+                continue
+            if step in keep:
+                continue
+            print(f"Pruning checkpoint {d} (keep latest={self.global_steps}, best={self._best_global_step})")
+            shutil.rmtree(d, ignore_errors=True)
+
+    def _register_save_round(self, val_metrics, metrics):
+        """Run at a checkpoint-save round: update best-checkpoint tracking against
+        the checkpoint just saved, prune to best+latest if enabled, and report
+        whether early stopping should fire (no improvement for
+        ``trainer.early_stop_tolerance`` consecutive save rounds)."""
+        score = self._avg_benchmark_val_score(val_metrics)
+        if score is None:
+            return False
+
+        min_delta = float(self.config.trainer.get("early_stop_min_delta", 0.0))
+        improved = self._best_val_score is None or score > self._best_val_score + min_delta
+        if improved:
+            self._best_val_score = score
+            self._best_global_step = self.global_steps
+            self._early_stop_no_improve = 0
+        else:
+            self._early_stop_no_improve += 1
+
+        metrics["early_stop/avg_benchmark_score"] = score
+        metrics["early_stop/best_score"] = self._best_val_score
+        metrics["early_stop/best_step"] = self._best_global_step
+        metrics["early_stop/rounds_no_improve"] = self._early_stop_no_improve
+
+        if self.config.trainer.get("keep_best_and_latest_ckpt", False):
+            self._keep_best_and_latest_checkpoints()
+        self._save_best_ckpt_state()
+
+        tol = self.config.trainer.get("early_stop_tolerance", None)
+        if tol is not None and self._early_stop_no_improve >= int(tol):
+            print(
+                f"Early stopping: averaged benchmark score did not improve for "
+                f"{self._early_stop_no_improve} save rounds (tolerance={tol}). "
+                f"Best={self._best_val_score:.4f} @ global_step {self._best_global_step}."
+            )
+            return True
+        return False
+
     def _load_checkpoint(self):
         if self.config.trainer.resume_mode == "disable":
             return 0
@@ -1408,6 +1514,8 @@ class RayPPOTrainer:
         self.global_steps += 1
         last_val_metrics = None
         self.max_steps_duration = 0
+        # best-checkpoint / early-stop bookkeeping (restored across resume)
+        self._load_best_ckpt_state()
 
         SkipManager.set_step(self.global_steps)
 
@@ -1641,6 +1749,9 @@ class RayPPOTrainer:
                         critic_output_metrics = reduce_metrics(critic_output.meta_info["metrics"])
                         metrics.update(critic_output_metrics)
 
+                    # whether a checkpoint was written this step (set in the save block below)
+                    saved_this_step = False
+
                     # implement critic warmup
                     if self.config.trainer.critic_warmup > self.global_steps:
                         # Still in critic warmup, only update weights to wake up rollout replicas.
@@ -1671,6 +1782,7 @@ class RayPPOTrainer:
                                 print("Force saving checkpoint: ESI instance expiration approaching.")
                             with marked_timer("save_checkpoint", timing_raw, color="green"):
                                 self._save_checkpoint()
+                            saved_this_step = True
 
                         # update weights from trainer to rollout
                         with marked_timer("update_weights", timing_raw, color="red"):
@@ -1693,6 +1805,15 @@ class RayPPOTrainer:
                         if is_last_step:
                             last_val_metrics = val_metrics
                     metrics.update(val_metrics)
+
+                # best-checkpoint selection + early stopping, evaluated only at
+                # checkpoint-save rounds (no extra saves: best is chosen among the
+                # checkpoints already written at save_freq cadence).
+                do_early_stop = False
+                if saved_this_step and self.config.trainer.test_freq > 0 and (
+                    is_last_step or self.global_steps % self.config.trainer.test_freq == 0
+                ):
+                    do_early_stop = self._register_save_round(val_metrics, metrics)
 
                 with marked_timer("stop_profile", timing_raw):
                     next_step_profile = (
@@ -1760,6 +1881,17 @@ class RayPPOTrainer:
                         self.actor_rollout_wg.async_calls_finalize_fn_exec(blocking=True)
                     self._shutdown_dump_executor()
                     pprint(f"Final validation metrics: {last_val_metrics}")
+                    progress_bar.close()
+                    return
+
+                if do_early_stop:
+                    if hasattr(self.actor_rollout_wg, "async_calls_finalize_fn_exec"):
+                        self.actor_rollout_wg.async_calls_finalize_fn_exec(blocking=True)
+                    self._shutdown_dump_executor()
+                    pprint(
+                        f"Early stopping triggered. Best avg benchmark score "
+                        f"{self._best_val_score} at global_step {self._best_global_step}."
+                    )
                     progress_bar.close()
                     return
 

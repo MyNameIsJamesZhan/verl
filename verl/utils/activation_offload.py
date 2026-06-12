@@ -529,9 +529,10 @@ def enable_activation_offloading(model, strategy, enable_ckpt=False):
                 wrapped_module = child
                 if isinstance(child, FSDP):
                     wrapped_module = child._fsdp_wrapped_module
-                # In some cases, torch.nn.Embedding is wrapped with FSDP alone. However, the activation
-                # size of torch.nn.Embedding is small, so it's not necessary to offload it.
-                if not isinstance(wrapped_module, torch.nn.Embedding):
+                # Skip the embedding and output heads (lm_head/score): when untied they are wrapped as
+                # their own FSDP units but never commit a layer group (fused-kernel head bypasses their
+                # forward), which would desync the offload group reload bookkeeping.
+                if not isinstance(wrapped_module, torch.nn.Embedding) and name not in ("lm_head", "score"):
                     layers.append(child)
 
     get_layers(model)

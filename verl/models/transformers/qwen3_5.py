@@ -263,6 +263,9 @@ def forward_with_torch_backend(
     vocab_weights = self.lm_head.weight
     if isinstance(vocab_weights, DTensor):
         vocab_weights = vocab_weights.full_tensor()
+    # FSDP param_offload can leave the lm_head weight on CPU; co-locate it with the activations.
+    if vocab_weights.device != hidden_states.device:
+        vocab_weights = vocab_weights.to(hidden_states.device)
 
     ulysses_sequence_parallel_size = get_ulysses_sequence_parallel_world_size()
     if ulysses_sequence_parallel_size > 1:
@@ -316,6 +319,9 @@ def forward_with_triton_backend(
     hidden_states = hidden_states.to(vocab_weights.dtype)
     if isinstance(vocab_weights, DTensor):
         vocab_weights = vocab_weights.full_tensor()
+    # FSDP param_offload can leave the lm_head weight on CPU; co-locate it with the activations.
+    if vocab_weights.device != hidden_states.device:
+        vocab_weights = vocab_weights.to(hidden_states.device)
 
     log_probs, entropy = linear_cross_entropy(
         hidden_states,
