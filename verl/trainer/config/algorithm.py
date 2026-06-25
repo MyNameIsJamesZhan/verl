@@ -667,3 +667,11 @@ class AlgoConfig(BaseConfig):
     # gdpo_reward_weights: per-dimension weights for aggregation (default: equal weights).
     gdpo_reward_keys: Optional[list[str]] = None
     gdpo_reward_weights: Optional[list[float]] = None
+    # EA-GRPO (Edit-Aware GRPO, arXiv:2604.05963) settings. Correctness-gated,
+    # group-accuracy-thresholded edit-cost penalty on the scalar reward, then
+    # vanilla GRPO. unit_key/edit_key name the per-sample reward_extra_info fields
+    # (in non_tensor_batch) for correctness and edit cost.
+    ea_grpo_alpha: float = 0.8
+    ea_grpo_beta: float = 0.05
+    ea_grpo_unit_key: str = "unit"
+    ea_grpo_edit_key: str = "edit_line"

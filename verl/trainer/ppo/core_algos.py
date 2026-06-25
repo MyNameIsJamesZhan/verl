@@ -108,6 +108,7 @@ class AdvantageEstimator(str, Enum):
     OPTIMAL_TOKEN_BASELINE = "optimal_token_baseline"
     TIR_OPTIMAL_TOKEN_BASELINE = "tir_optimal_token_baseline"
     GDPO = "gdpo"
+    EA_GRPO = "ea_grpo"
 
 
 ADV_ESTIMATOR_REGISTRY: dict[str, Any] = {}
@@ -466,6 +467,129 @@ def compute_gdpo_outcome_advantage(
     advantages = verl_F.masked_whiten(new_advantage, response_mask) * response_mask
 
     return advantages, advantages
+
+
+def _ea_grpo_shaped_reward(
+    unit: np.ndarray,
+    edit: np.ndarray,
+    index: np.ndarray,
+    alpha: float,
+    beta: float,
+    eps: float = 1e-6,
+) -> np.ndarray:
+    """EA-GRPO scalar reward per sample (QiMeng-PRepair, arXiv:2604.05963).
+
+    Per rollout group g (samples sharing ``index``):
+        T   = 1 if mean(unit_g) >= alpha else 0          (group-accuracy gate)
+        P_i = sigmoid( z(edit_i over the CORRECT subset) ) (edit-cost penalty)
+        R_i = unit_i * (1 - T * beta * P_i)               (incorrect -> 0)
+
+    ``edit`` is the raw buggy->pred changed-line count (our ``edit_line``); the
+    paper's /|X| normalization is group-shared and cancels under the within-group
+    z-score, so edit_line is interchangeable with the paper's D_EC here.
+
+    Args:
+        unit: (bs,) correctness in {0, 1}.
+        edit: (bs,) edit cost (``edit_line``).
+        index: (bs,) group id per sample (from ``uid``).
+        alpha: group-accuracy threshold that activates the penalty.
+        beta: penalty strength.
+        eps: std-stabilizer.
+
+    Returns:
+        (bs,) float32 shaped reward.
+    """
+    unit = np.asarray(unit, dtype=np.float32)
+    edit = np.asarray(edit, dtype=np.float32)
+    index = np.asarray(index)
+    R = np.zeros_like(unit, dtype=np.float32)
+    for g in np.unique(index):
+        m = index == g
+        u_g = unit[m]
+        e_g = edit[m]
+        c = u_g >= 0.5  # correct subset within the group
+        T = 1.0 if u_g.mean() >= alpha else 0.0
+        P = np.zeros_like(e_g)
+        # Standardize edit cost over the correct subset; needs >1 correct for a
+        # defined std. Single-correct / std~0 -> P=0 -> that sample keeps R=1.
+        if T and c.sum() > 1:
+            ec = e_g[c]
+            z = (e_g - ec.mean()) / (ec.std() + eps)
+            P = 1.0 / (1.0 + np.exp(-z))
+        R[m] = np.where(c, 1.0 - T * beta * P, 0.0)
+    return R
+
+
+@register_adv_est(AdvantageEstimator.EA_GRPO)  # or simply: @register_adv_est("ea_grpo")
+def compute_ea_grpo_outcome_advantage(
+    token_level_rewards: torch.Tensor,
+    response_mask: torch.Tensor,
+    index: np.ndarray,
+    epsilon: float = 1e-6,
+    norm_adv_by_std_in_grpo: bool = True,
+    config: Optional[AlgoConfig] = None,
+    non_tensor_batch: Optional[dict] = None,
+    batch: Optional[dict] = None,
+    **kwargs,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """EA-GRPO: edit-aware GRPO (QiMeng-PRepair, arXiv:2604.05963).
+
+    Replaces the incoming scalar reward with a correctness-gated, group-accuracy-
+    thresholded, edit-cost-penalized reward built from per-sample ``unit`` and
+    ``edit_line`` (read from ``non_tensor_batch``), then runs standard GRPO
+    normalization + uniform broadcast. The incoming ``token_level_rewards``
+    (our composite) is intentionally ignored so this is a faithful baseline.
+
+    Args:
+        token_level_rewards: (bs, response_length) — unused except for device/shape.
+        response_mask: (bs, response_length).
+        index: (bs,) group id per sample (from ``uid``).
+        epsilon: GRPO normalization stabilizer.
+        norm_adv_by_std_in_grpo: passed through to GRPO normalization.
+        config: AlgoConfig — reads ``ea_grpo_alpha`` / ``ea_grpo_beta`` /
+            ``ea_grpo_unit_key`` / ``ea_grpo_edit_key``.
+        non_tensor_batch: holds the per-sample ``unit`` and ``edit_line`` arrays.
+        batch: holds ``prompts`` / ``attention_mask`` for last-token placement.
+
+    Returns:
+        advantages, returns — both (bs, response_length).
+    """
+    assert config is not None and non_tensor_batch is not None and batch is not None, (
+        "EA-GRPO requires config, non_tensor_batch and batch (wired in "
+        "ray_trainer.compute_advantage)."
+    )
+    alpha = config.get("ea_grpo_alpha", 0.8)
+    beta = config.get("ea_grpo_beta", 0.05)
+    u_key = config.get("ea_grpo_unit_key", "unit")
+    e_key = config.get("ea_grpo_edit_key", "edit_line")
+    for key in (u_key, e_key):
+        assert key in non_tensor_batch, (
+            f"EA-GRPO reward key '{key}' not found in non_tensor_batch. "
+            f"Available keys: {list(non_tensor_batch.keys())}. "
+            f"Make sure the reward manager surfaces '{key}' in reward_extra_info."
+        )
+
+    unit = np.asarray(non_tensor_batch[u_key], dtype=np.float32)
+    edit = np.asarray(non_tensor_batch[e_key], dtype=np.float32)
+    R = _ea_grpo_shaped_reward(unit, edit, np.asarray(index), alpha, beta)
+
+    # Place the shaped scalar on the last valid response token (same idiom as GDPO).
+    device = token_level_rewards.device
+    prompt_length = batch["prompts"].size(1)
+    valid_response_length = batch["attention_mask"][:, prompt_length:].sum(dim=1) - 1
+    rm_scores = torch.zeros_like(response_mask, dtype=torch.float32)
+    rm_scores[torch.arange(rm_scores.size(0), device=device), valid_response_length] = torch.tensor(
+        R, dtype=torch.float32, device=device
+    )
+
+    return compute_grpo_outcome_advantage(
+        token_level_rewards=rm_scores,
+        response_mask=response_mask,
+        index=index,
+        epsilon=epsilon,
+        norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
+        config=config,
+    )
 
 
 @register_adv_est(AdvantageEstimator.GRPO_PASSK)  # or simply: @register_adv_est("grpo_passk")
