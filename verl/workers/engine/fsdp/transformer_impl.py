@@ -289,12 +289,15 @@ class FSDPEngine(BaseEngine):
             )
 
             use_fused_kernels = self.model_config.use_fused_kernels
+            tiled_mlp_options = self.model_config.tiled_mlp or {}
             apply_monkey_patch(
                 model=module,
                 use_remove_padding=self.use_remove_padding,
                 ulysses_sp_size=self.ulysses_sequence_parallel_size,
                 use_fused_kernels=use_fused_kernels,
                 fused_kernels_backend=fused_kernels_backend,
+                use_tiled_mlp=tiled_mlp_options.get("enabled", False),
+                tiled_mlp_shards=tiled_mlp_options.get("num_shards", 4),
             )
 
             # some parameters may not in torch_dtype
