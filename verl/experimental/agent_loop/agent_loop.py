@@ -606,6 +606,9 @@ class AgentLoopWorker:
                 tools=ToolListWrap(self.tools),
             )
             output: AgentLoopOutput = await agent_loop.run(sampling_params, **kwargs)
+            # Expose the training step to step-aware reward managers; single-turn loops don't set it (reward would see step=0). setdefault preserves a multi-turn loop's own value.
+            output.extra_fields.setdefault("max_global_steps", trajectory["step"])
+            output.extra_fields.setdefault("min_global_steps", trajectory["step"])
             return await self._agent_loop_postprocess(output, trajectory["validate"], **kwargs)
 
     def _pad_token_ids(
@@ -897,6 +900,7 @@ class AgentLoopWorker:
                     "tool_extra_fields": np.array([o.extra_fields for o in outputs], dtype=object),
                     "prompt_len": np.array([len(o.prompt_ids) for o in outputs]),
                     "response_len": np.array([len(o.response_ids) for o in outputs]),
+                    "max_global_steps": np.array([o.extra_fields.get("max_global_steps") for o in outputs]),
                 }
 
                 data = DataProto(

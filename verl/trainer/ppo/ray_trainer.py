@@ -1041,16 +1041,32 @@ class RayPPOTrainer:
             f.write(str(self.global_steps))
 
     def _avg_benchmark_val_score(self, val_metrics):
-        """Average the per-benchmark core validation reward.
+        """Average the per-benchmark Debug Score (DS).
 
-        Returns the mean over all ``val-core/<data_source>/{acc|reward}/mean@N``
-        keys (the composite RL reward per benchmark), or None if none present.
-        Drives best-checkpoint selection and early stopping (see ppo_trainer.yaml).
+        DS = unit+f1, read from ``val-aux/<data_source>/{unit,f1}/mean@N``
+        (logged independently of the training-time F1 weight k in
+        ``debug_reward_manager._composite``). Being independent of k, it stays
+        comparable across a K hyperparameter sweep and across runs, rather
+        than each run grading itself on its own training reward. Returns None
+        if no benchmark logs both unit and f1 (e.g. non-debug data sources).
+        Drives best-checkpoint selection and early stopping (see
+        ppo_trainer.yaml).
         """
         import re
 
-        pat = re.compile(r"^val-core/[^/]+/(?:acc|reward)/mean@\d+$")
-        scores = [float(v) for k, v in val_metrics.items() if pat.match(k)]
+        unit_pat = re.compile(r"^val-aux/([^/]+)/unit/(mean@\d+)$")
+        scores = []
+        for key, unit_val in val_metrics.items():
+            m = unit_pat.match(key)
+            if not m:
+                continue
+            data_source, metric_suffix = m.group(1), m.group(2)
+            f1_key = f"val-aux/{data_source}/f1/{metric_suffix}"
+            if f1_key not in val_metrics:
+                continue
+            u = float(unit_val)
+            f1 = float(val_metrics[f1_key])
+            scores.append(u + f1)
         if not scores:
             return None
         return sum(scores) / len(scores)
