@@ -667,6 +667,10 @@ class AlgoConfig(BaseConfig):
     # gdpo_reward_weights: per-dimension weights for aggregation (default: equal weights).
     gdpo_reward_keys: Optional[list[str]] = None
     gdpo_reward_weights: Optional[list[float]] = None
+    # gdpo_batch_whiten: apply the paper's final batch-level masked_whiten to the weighted
+    #   sum of per-key group advantages. False keeps the raw sum (zero-mean per group,
+    #   no token-weighted batch rescaling) — see PreciseCoder experiments/gt_training.
+    gdpo_batch_whiten: bool = True
     # EA-GRPO (Edit-Aware GRPO, arXiv:2604.05963) settings. Correctness-gated,
     # group-accuracy-thresholded edit-cost penalty on the scalar reward, then
     # vanilla GRPO. unit_key/edit_key name the per-sample reward_extra_info fields

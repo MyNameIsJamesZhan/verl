@@ -386,7 +386,8 @@ def compute_gdpo_outcome_advantage(
         Step 2 – Weighted aggregation:
             A_sum = Σ_k w_k · A_k
 
-        Step 3 – Batch-level normalization (via masked_whiten):
+        Step 3 – Batch-level normalization (via masked_whiten), skipped when
+            config.gdpo_batch_whiten is False:
             A_final = whiten(A_sum, response_mask)
 
     Args:
@@ -464,7 +465,14 @@ def compute_gdpo_outcome_advantage(
         else:
             new_advantage += weights[i] * normalized_score
 
-    advantages = verl_F.masked_whiten(new_advantage, response_mask) * response_mask
+    # Step 3 is optional: with gdpo_batch_whiten=False the advantage is the raw
+    # weighted sum of per-key group z-scores (already zero-mean within each group),
+    # avoiding the token-weighted batch mean shift / rescaling of masked_whiten.
+    batch_whiten = True if config is None else bool(config.get("gdpo_batch_whiten", True))
+    if batch_whiten:
+        advantages = verl_F.masked_whiten(new_advantage, response_mask) * response_mask
+    else:
+        advantages = new_advantage * response_mask
 
     return advantages, advantages
 
