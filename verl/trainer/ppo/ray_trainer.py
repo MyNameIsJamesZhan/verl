@@ -1043,7 +1043,7 @@ class RayPPOTrainer:
     def _avg_benchmark_val_score(self, val_metrics):
         """Average the per-benchmark Debug Score (DS).
 
-        DS = unit+f1, read from ``val-aux/<data_source>/{unit,f1}/mean@N``
+        DS = unit + 0.5*f1, read from ``val-aux/<data_source>/{unit,f1}/mean@N``
         (logged independently of the training-time F1 weight k in
         ``debug_reward_manager._composite``). Being independent of k, it stays
         comparable across a K hyperparameter sweep and across runs, rather
@@ -1061,12 +1061,14 @@ class RayPPOTrainer:
             if not m:
                 continue
             data_source, metric_suffix = m.group(1), m.group(2)
+            if data_source.startswith("gtdebug_"):  # clean-input probe: no P/R/F1, not a benchmark
+                continue
             f1_key = f"val-aux/{data_source}/f1/{metric_suffix}"
             if f1_key not in val_metrics:
                 continue
             u = float(unit_val)
             f1 = float(val_metrics[f1_key])
-            scores.append(u + f1)
+            scores.append(u + 0.5 * f1)
         if not scores:
             return None
         return sum(scores) / len(scores)

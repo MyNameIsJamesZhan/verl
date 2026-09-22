@@ -43,6 +43,7 @@ class SamplingConfig(BaseConfig):
     do_sample: bool = True
     n: int = 1
     thinking_token_budget: Optional[int] = None
+    response_length: Optional[int] = None
 
 
 @dataclass

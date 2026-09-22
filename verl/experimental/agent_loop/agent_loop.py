@@ -520,6 +520,9 @@ class AgentLoopWorker:
                 sampling_params["thinking_token_budget"] = val_budget
             elif "thinking_token_budget" in sampling_params:
                 del sampling_params["thinking_token_budget"]
+            val_response_length = getattr(config.val_kwargs, "response_length", None)
+            if val_response_length is not None:
+                sampling_params["max_tokens"] = val_response_length
 
         # by default, we assume it's a single turn agent
         if "agent_name" not in batch.non_tensor_batch:
@@ -666,23 +669,26 @@ class AgentLoopWorker:
             return_attention_mask=True,
         )
 
+        response_length = self.rollout_config.response_length
+        if validate and self.rollout_config.val_kwargs.response_length is not None:
+            response_length = self.rollout_config.val_kwargs.response_length
         response_output = self._pad_token_ids(
             output.response_ids,
-            max_length=self.rollout_config.response_length,
+            max_length=response_length,
             padding_side="right",
             return_attention_mask=True,
         )
 
         response_mask_output = self._pad_token_ids(
             output.response_mask,
-            max_length=self.rollout_config.response_length,
+            max_length=response_length,
             padding_side="right",
             return_attention_mask=False,
         )
 
         response_logprobs = None
         if output.response_logprobs is not None:
-            pad_size = self.rollout_config.response_length - len(output.response_logprobs)
+            pad_size = response_length - len(output.response_logprobs)
             response_logprobs = torch.tensor(output.response_logprobs + [0.0] * pad_size).unsqueeze(0)
 
         response_mask = response_mask_output["input_ids"] * response_output["attention_mask"]

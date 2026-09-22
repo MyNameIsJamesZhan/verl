@@ -302,6 +302,13 @@ class vLLMColocateWorkerExtension:
         """
         replica_rank = os.environ.get("VERL_REPLICA_RANK", "0")
         job_id = os.environ.get("VERL_RAY_JOB_ID", "0")
+        # VERL_ZMQ_TAG: optional per-run token. Two independent Ray clusters on
+        # one host both number their first job 01000000, so two verl runs
+        # co-located on a node (e.g. 2x 4-GPU steps in one Slurm job) would
+        # otherwise share every socket path and cross-deliver IPC handles
+        # (seen 2026-09-13: TypeError 'str' object is not callable in rebuild_ipc).
+        tag = os.environ.get("VERL_ZMQ_TAG", "")
+        job_id = f"{job_id}-{tag}" if tag else job_id
         return f"ipc:///tmp/rl-colocate-zmq-{job_id}-replica-{replica_rank}-rank-{self.local_rank}.sock"
 
 

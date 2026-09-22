@@ -168,6 +168,10 @@ val_kwargs:
   # vLLM thinking-token budget for validation rollouts (null = unbounded).
   thinking_token_budget: null
 
+  # Max response tokens for validation rollouts (null = rollout.response_length).
+  # Needs rollout.max_model_len >= prompt_length + this.
+  response_length: null
+
 # Multi-turn tool config.
 multi_turn:
 
