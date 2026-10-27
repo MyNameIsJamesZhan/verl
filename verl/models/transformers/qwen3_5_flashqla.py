@@ -109,6 +109,9 @@ def register_vllm_gdn_patch() -> None:
 
     # Same signature/defaults as the fla forward_native it replaces (scale defaults to
     # head_dim**-0.5 inside both kernels); returns (o, final_state).
+    # vLLM's vendored fla keeps the recurrent state as [N, H, V, K]; FlashQLA uses upstream
+    # fla's [N, H, K, V]. With K == V (Qwen3.5) shapes match, so without these transposes the
+    # state is silently corrupted at every prefill->decode handoff (garbage after token 1).
     def forward_flashqla(
         self,
         q,
@@ -121,17 +124,21 @@ def register_vllm_gdn_patch() -> None:
         cu_seqlens=None,
         use_qk_l2norm_in_kernel=True,
     ):
-        return flashqla_chunk(
+        h0 = initial_state.transpose(-1, -2).contiguous() if initial_state is not None else None
+        o, final_state = flashqla_chunk(
             q=q.contiguous(),
             k=k.contiguous(),
             v=v.contiguous(),
             g=g,
             beta=beta,
-            initial_state=initial_state,
+            initial_state=h0,
             output_final_state=output_final_state,
             cu_seqlens=cu_seqlens,
             use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
         )
+        if final_state is not None:
+            final_state = final_state.transpose(-1, -2).contiguous()
+        return o, final_state
 
     ChunkGatedDeltaRule.forward_native = forward_flashqla
     logger.warning("FlashQLA GDN: rerouted vLLM prefill (forward_native).")

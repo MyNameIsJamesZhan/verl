@@ -516,6 +516,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             # The ref model does not need to enable MTP; force it to false.
             ref_config.model_config = deepcopy(model_config)
             ref_config.model_config.mtp = MtpConfig(enable=False)
+            # PDB_REF_MODEL_PATH: keep the KL anchor on the original base when the actor starts from an HF export.
+            if os.environ.get("PDB_REF_MODEL_PATH"):
+                for _f in ("path", "local_path"):  # frozen dataclass
+                    object.__setattr__(ref_config.model_config, _f, os.environ["PDB_REF_MODEL_PATH"])
 
             # construct TrainingWorkerConfig
             ref_training_config = TrainingWorkerConfig(

@@ -1202,10 +1202,13 @@ class RayPPOTrainer:
 
         actor_path = os.path.join(global_step_folder, "actor")
         critic_path = os.path.join(global_step_folder, str(Role.Critic))
-        # load actor
-        self.actor_rollout_wg.load_checkpoint(
-            actor_path, del_local_after_load=self.config.trainer.del_local_ckpt_after_load
-        )
+        # load actor (PDB_RESUME_SKIP_ACTOR=1: shards pruned; weights come from model.path, optimizer starts fresh)
+        if os.environ.get("PDB_RESUME_SKIP_ACTOR") == "1":
+            print(f"PDB_RESUME_SKIP_ACTOR=1: not loading actor/optimizer from {actor_path}")
+        else:
+            self.actor_rollout_wg.load_checkpoint(
+                actor_path, del_local_after_load=self.config.trainer.del_local_ckpt_after_load
+            )
         # load critic
         if self.use_critic:
             self.critic_wg.load_checkpoint(
@@ -1869,6 +1872,18 @@ class RayPPOTrainer:
                             metrics[f"gdpo/{key}/std"] = float(np.std(vals))
                             metrics[f"gdpo/{key}/max"] = float(np.max(vals))
                             metrics[f"gdpo/{key}/min"] = float(np.min(vals))
+                # PDB training-rollout curves: unit pass rate, edited lines (all / unit-passing rollouts)
+                if "unit" in batch.non_tensor_batch and "edit_line" in batch.non_tensor_batch:
+                    unit = np.asarray(batch.non_tensor_batch["unit"], dtype=np.float32)
+                    edit = np.asarray(batch.non_tensor_batch["edit_line"], dtype=np.float32)
+                    passed = unit == 1
+                    metrics["pdb_train/unit/mean"] = float(unit.mean())
+                    metrics["pdb_train/edit_line/mean"] = float(edit.mean())
+                    metrics["pdb_train/edit_line/median"] = float(np.median(edit))
+                    metrics["pdb_train/n_pass"] = int(passed.sum())
+                    if passed.any():
+                        metrics["pdb_train/edit_line_pass/mean"] = float(edit[passed].mean())
+                        metrics["pdb_train/edit_line_pass/median"] = float(np.median(edit[passed]))
                 metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))
                 # TODO: implement actual tflpo and theoretical tflpo
                 n_gpus = self.resource_pool_manager.get_n_gpus()
