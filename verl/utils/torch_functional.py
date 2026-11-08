@@ -245,22 +245,24 @@ def entropy_from_logits_with_chunking(logits: torch.Tensor, chunk_size: int = 20
     usage. Useful for large batch sizes or when memory is constrained.
 
     Args:
-        logits: Unnormalized log-probabilities of shape (batch_size, vocab_size).
+        logits: Unnormalized log-probabilities of shape (..., vocab_size).
         chunk_size: Number of samples to process at once. Defaults to 2048.
 
     Returns:
-        torch.Tensor: Entropy values with shape (batch_size,).
+        torch.Tensor: Entropy values with shape (...,), one per distribution.
 
     Note:
         Converts chunks to float32 for numerical stability during computation.
     """
-    entropy = torch.zeros(logits.shape[0], device=logits.device)
-    for i in range(0, logits.shape[0], chunk_size):
-        logits_chunk = logits[i : i + chunk_size].float()
+    leading_shape = logits.shape[:-1]
+    flat_logits = logits.reshape(-1, logits.shape[-1])
+    entropy = torch.zeros(flat_logits.shape[0], device=flat_logits.device)
+    for i in range(0, flat_logits.shape[0], chunk_size):
+        logits_chunk = flat_logits[i : i + chunk_size].float()
         pd_chunk = torch.nn.functional.softmax(logits_chunk, dim=-1)
         entropy_chunk = torch.logsumexp(logits_chunk, dim=-1) - torch.sum(pd_chunk * logits_chunk, dim=-1)
         entropy[i : i + chunk_size] = entropy_chunk
-    return entropy
+    return entropy.reshape(leading_shape)
 
 
 def masked_sum(values: torch.Tensor, mask: torch.Tensor, axis: int | tuple[int, ...] | None = None) -> torch.Tensor:

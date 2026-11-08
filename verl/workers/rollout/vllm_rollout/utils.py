@@ -302,6 +302,11 @@ class vLLMColocateWorkerExtension:
         """
         replica_rank = os.environ.get("VERL_REPLICA_RANK", "0")
         job_id = os.environ.get("VERL_RAY_JOB_ID", "0")
+        # VERL_ZMQ_TAG: optional per-run token. Independent Ray clusters on one host
+        # all number their first job 01000000, so co-located verl runs would otherwise
+        # share socket paths and receive each other's IPC handles.
+        tag = os.environ.get("VERL_ZMQ_TAG", "")
+        job_id = f"{job_id}-{tag}" if tag else job_id
         return f"ipc:///tmp/rl-colocate-zmq-{job_id}-replica-{replica_rank}-rank-{self.local_rank}.sock"
 
 

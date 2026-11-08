@@ -31,6 +31,7 @@ import asyncio
 import logging
 import os
 import random
+import time
 from abc import ABC, abstractmethod
 from typing import Any, Optional
 from uuid import uuid4
@@ -501,6 +502,8 @@ class AgentLoopWorker:
             repetition_penalty=1.0,
             logprobs=config.calculate_log_probs,
         )
+        if getattr(config, "thinking_token_budget", None) is not None:
+            sampling_params["thinking_token_budget"] = config.thinking_token_budget
 
         def apply_greedy_sampling_params(params: dict[str, Any]) -> None:
             params["top_p"] = 1.0
@@ -512,6 +515,14 @@ class AgentLoopWorker:
             sampling_params["top_p"] = config.val_kwargs.top_p
             sampling_params["top_k"] = config.val_kwargs.top_k
             sampling_params["temperature"] = config.val_kwargs.temperature
+            val_budget = getattr(config.val_kwargs, "thinking_token_budget", None)
+            if val_budget is not None:
+                sampling_params["thinking_token_budget"] = val_budget
+            elif "thinking_token_budget" in sampling_params:
+                del sampling_params["thinking_token_budget"]
+            val_response_length = getattr(config.val_kwargs, "response_length", None)
+            if val_response_length is not None:
+                sampling_params["max_tokens"] = val_response_length
 
         # by default, we assume it's a single turn agent
         if "agent_name" not in batch.non_tensor_batch:
@@ -598,6 +609,10 @@ class AgentLoopWorker:
                 tools=ToolListWrap(self.tools),
             )
             output: AgentLoopOutput = await agent_loop.run(sampling_params, **kwargs)
+            # Expose the training step to step-aware reward managers (single-turn loops
+            # don't set it); setdefault keeps a multi-turn loop's own value.
+            output.extra_fields.setdefault("max_global_steps", trajectory["step"])
+            output.extra_fields.setdefault("min_global_steps", trajectory["step"])
             return await self._agent_loop_postprocess(output, trajectory["validate"], **kwargs)
 
     def _pad_token_ids(
@@ -655,23 +670,26 @@ class AgentLoopWorker:
             return_attention_mask=True,
         )
 
+        response_length = self.rollout_config.response_length
+        if validate and self.rollout_config.val_kwargs.response_length is not None:
+            response_length = self.rollout_config.val_kwargs.response_length
         response_output = self._pad_token_ids(
             output.response_ids,
-            max_length=self.rollout_config.response_length,
+            max_length=response_length,
             padding_side="right",
             return_attention_mask=True,
         )
 
         response_mask_output = self._pad_token_ids(
             output.response_mask,
-            max_length=self.rollout_config.response_length,
+            max_length=response_length,
             padding_side="right",
             return_attention_mask=False,
         )
 
         response_logprobs = None
         if output.response_logprobs is not None:
-            pad_size = self.rollout_config.response_length - len(output.response_logprobs)
+            pad_size = response_length - len(output.response_logprobs)
             response_logprobs = torch.tensor(output.response_logprobs + [0.0] * pad_size).unsqueeze(0)
 
         response_mask = response_mask_output["input_ids"] * response_output["attention_mask"]
@@ -889,6 +907,7 @@ class AgentLoopWorker:
                     "tool_extra_fields": np.array([o.extra_fields for o in outputs], dtype=object),
                     "prompt_len": np.array([len(o.prompt_ids) for o in outputs]),
                     "response_len": np.array([len(o.response_ids) for o in outputs]),
+                    "max_global_steps": np.array([o.extra_fields.get("max_global_steps") for o in outputs]),
                 }
 
                 data = DataProto(

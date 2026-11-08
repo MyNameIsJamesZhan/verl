@@ -381,5 +381,107 @@ def test_kl_penalty_k3_plus_uses_k2_gradient():
     assert torch.allclose(grad_plus, grad_k2)
 
 
+# ---------------------------------------------------------------------------
+# EA-GRPO (edit-aware GRPO, arXiv:2604.05963)
+# ---------------------------------------------------------------------------
+from verl.trainer.ppo.core_algos import (  # noqa: E402
+    _ea_grpo_shaped_reward,
+    compute_ea_grpo_outcome_advantage,
+)
+
+
+def _sigmoid(x):
+    return 1.0 / (1.0 + np.exp(-x))
+
+
+def test_ea_grpo_below_threshold_disables_penalty():
+    # group accuracy 2/3 < alpha=0.8 -> T=0 -> correct samples get exactly 1.0,
+    # incorrect get 0.0, regardless of edit cost.
+    unit = np.array([1.0, 1.0, 0.0])
+    edit = np.array([0.0, 5.0, 1.0])
+    index = np.array(["g", "g", "g"], dtype=object)
+    R = _ea_grpo_shaped_reward(unit, edit, index, alpha=0.8, beta=0.05)
+    np.testing.assert_allclose(R, [1.0, 1.0, 0.0])
+
+
+def test_ea_grpo_penalizes_larger_edit_within_correct_group():
+    # all correct (acc=1 >= alpha) -> T=1; penalty = beta * sigmoid(z(edit)).
+    unit = np.array([1.0, 1.0, 1.0])
+    edit = np.array([0.0, 1.0, 2.0])
+    index = np.array([7, 7, 7])
+    beta, eps = 0.5, 1e-6
+    R = _ea_grpo_shaped_reward(unit, edit, index, alpha=0.0, beta=beta, eps=eps)
+
+    z = (edit - edit.mean()) / (edit.std() + eps)
+    expected = 1.0 - beta * _sigmoid(z)
+    np.testing.assert_allclose(R, expected, rtol=1e-5, atol=1e-6)
+    # monotonic: more edits -> lower reward
+    assert R[0] > R[1] > R[2]
+
+
+def test_ea_grpo_incorrect_zero_and_correct_subset_standardization():
+    # incorrect -> 0; standardization uses ONLY the correct subset's edit stats.
+    unit = np.array([1.0, 1.0, 0.0, 0.0])
+    edit = np.array([1.0, 3.0, 100.0, 0.0])  # incorrect edits must not affect z
+    index = np.array(["p", "p", "p", "p"], dtype=object)
+    beta, eps = 0.05, 1e-6
+    R = _ea_grpo_shaped_reward(unit, edit, index, alpha=0.0, beta=beta, eps=eps)
+
+    ec = edit[:2]
+    z = (edit[:2] - ec.mean()) / (ec.std() + eps)
+    expected_correct = 1.0 - beta * _sigmoid(z)
+    np.testing.assert_allclose(R[:2], expected_correct, rtol=1e-5, atol=1e-6)
+    np.testing.assert_allclose(R[2:], [0.0, 0.0])
+
+
+def test_ea_grpo_single_correct_no_nan():
+    # one correct sample in the group -> std undefined -> P=0 -> reward 1.0, no NaN.
+    unit = np.array([1.0, 0.0, 0.0])
+    edit = np.array([4.0, 1.0, 2.0])
+    index = np.array(["s", "s", "s"], dtype=object)
+    R = _ea_grpo_shaped_reward(unit, edit, index, alpha=0.0, beta=0.05)
+    assert not np.isnan(R).any()
+    np.testing.assert_allclose(R, [1.0, 0.0, 0.0])
+
+
+def test_ea_grpo_outcome_advantage_integration():
+    # End-to-end: shaped reward -> last-token placement -> GRPO normalize+broadcast.
+    bs, prompt_len, resp_len = 4, 3, 5
+    index = np.array(["a", "a", "b", "b"], dtype=object)
+    unit = np.array([1.0, 1.0, 1.0, 0.0])
+    edit = np.array([1.0, 3.0, 2.0, 9.0])
+
+    token_level_rewards = torch.zeros(bs, resp_len, dtype=torch.float32)
+    response_mask = torch.ones(bs, resp_len, dtype=torch.float32)
+    batch = {
+        "prompts": torch.zeros(bs, prompt_len, dtype=torch.long),
+        # full attention -> valid_response_length = resp_len for every row
+        "attention_mask": torch.ones(bs, prompt_len + resp_len, dtype=torch.long),
+    }
+    config = {"ea_grpo_alpha": 0.0, "ea_grpo_beta": 0.05}
+
+    adv, ret = compute_ea_grpo_outcome_advantage(
+        token_level_rewards=token_level_rewards,
+        response_mask=response_mask,
+        index=index,
+        config=config,
+        non_tensor_batch={"unit": unit, "edit_line": edit},
+        batch=batch,
+    )
+
+    assert adv.shape == (bs, resp_len)
+    assert torch.isfinite(adv).all()
+    # advantage is broadcast uniformly across the response (every valid token equal)
+    assert torch.allclose(adv[:, 0:1].expand(-1, resp_len), adv)
+    # group b: sample 2 correct, sample 3 incorrect (R=0) -> sample 2 advantage > sample 3
+    assert adv[2, 0].item() > adv[3, 0].item()
+    # mirrors GRPO on the shaped scalar reward
+    R = _ea_grpo_shaped_reward(unit, edit, index, alpha=0.0, beta=0.05)
+    rm = torch.zeros(bs, resp_len, dtype=torch.float32)
+    rm[:, -1] = torch.tensor(R, dtype=torch.float32)
+    ref_adv, _ = compute_grpo_outcome_advantage(rm, response_mask, index)
+    assert torch.allclose(adv, ref_adv, rtol=1e-5, atol=1e-6)
+
+
 if __name__ == "__main__":
     unittest.main()

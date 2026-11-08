@@ -55,6 +55,7 @@ class SingleTurnAgentLoop(AgentLoopBase):
         )
 
         # 3. generate sequences
+        response_length = sampling_params.get("max_tokens", self.response_length)
         metrics = {}
         with simple_timer("generate_sequences", metrics):
             output: TokenOutput = await self.server_manager.generate(
@@ -72,11 +73,11 @@ class SingleTurnAgentLoop(AgentLoopBase):
 
         output: AgentLoopOutput = AgentLoopOutput(
             prompt_ids=prompt_ids,
-            response_ids=output.token_ids[: self.response_length],
-            response_mask=response_mask[: self.response_length],
-            response_logprobs=output.log_probs[: self.response_length] if output.log_probs else None,
+            response_ids=output.token_ids[:response_length],
+            response_mask=response_mask[:response_length],
+            response_logprobs=output.log_probs[:response_length] if output.log_probs else None,
             routed_experts=(
-                output.routed_experts[: len(prompt_ids) + self.response_length]
+                output.routed_experts[: len(prompt_ids) + response_length]
                 if output.routed_experts is not None
                 else None
             ),

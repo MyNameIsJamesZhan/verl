@@ -526,6 +526,12 @@ def apply_monkey_patch(
             patch_vlm_for_ulysses_input_slicing(Qwen3_5TextModel)
             patch_vlm_for_ulysses_input_slicing(Qwen3_5MoeTextModel)
 
+        # Step 3: optionally swap the GDN chunk kernel to FlashQLA (PDB_GDN_KERNEL=flashqla);
+        # no-op otherwise. Training/actor path only -- rollout is patched via vLLM plugin.
+        from verl.models.transformers.qwen3_5_flashqla import patch_transformers_gdn
+
+        patch_transformers_gdn(model)
+
     if use_remove_padding or ulysses_sp_size > 1:
         if hasattr(module, "_flash_attention_forward"):  # transformers <= 4.47.1 or legacy models
             module._flash_attention_forward = _ulysses_flash_attention_forward

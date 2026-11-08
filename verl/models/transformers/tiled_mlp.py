@@ -171,6 +171,8 @@ _MODEL_TYPE_TO_MLP_CLASS = {
     "qwen2": ("transformers.models.qwen2.modeling_qwen2", "Qwen2MLP"),
     "qwen2_5": ("transformers.models.qwen2.modeling_qwen2", "Qwen2MLP"),  # Qwen2.5 uses Qwen2 MLP
     "qwen3": ("transformers.models.qwen3.modeling_qwen3", "Qwen3MLP"),
+    "qwen3_5": ("transformers.models.qwen3_5.modeling_qwen3_5", "Qwen3_5MLP"),
+    "qwen3_5_moe": ("transformers.models.qwen3_5_moe.modeling_qwen3_5_moe", "Qwen3_5MoeMLP"),
 }
 
 

@@ -105,6 +105,8 @@ class ServerAdapter(BaseRollout):
         # stale socket file) cannot collide on the shared /tmp namespace.
         local_rank = self.rollout_rank % local_world_size
         job_id = ray.get_runtime_context().get_job_id()
+        _zmq_tag = os.environ.get("VERL_ZMQ_TAG", "")  # see utils._get_zmq_handle
+        job_id = f"{job_id}-{_zmq_tag}" if _zmq_tag else job_id
         self.zmq_handle = f"ipc:///tmp/rl-colocate-zmq-{job_id}-replica-{self.replica_rank}-rank-{local_rank}.sock"
 
         self.use_shm = not is_support_ipc()

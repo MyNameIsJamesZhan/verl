@@ -289,12 +289,15 @@ class FSDPEngine(BaseEngine):
             )
 
             use_fused_kernels = self.model_config.use_fused_kernels
+            tiled_mlp_options = self.model_config.tiled_mlp or {}
             apply_monkey_patch(
                 model=module,
                 use_remove_padding=self.use_remove_padding,
                 ulysses_sp_size=self.ulysses_sequence_parallel_size,
                 use_fused_kernels=use_fused_kernels,
                 fused_kernels_backend=fused_kernels_backend,
+                use_tiled_mlp=tiled_mlp_options.get("enabled", False),
+                tiled_mlp_shards=tiled_mlp_options.get("num_shards", 4),
             )
 
             # some parameters may not in torch_dtype
@@ -1195,13 +1198,13 @@ class FSDPEngineWithLMHead(FSDPEngine):
                 logits = output.logits  # (bsz, response_length, vocab_size)
                 temperature = output_args["temperature"]  # (bsz,)
                 temperature = temperature.unsqueeze(-1).unsqueeze(-1)
-                logits.div_(temperature.clamp(min=1e-8).to(logits.dtype))
+                logits = logits / temperature.clamp(min=1e-8).to(logits.dtype)
 
                 if calculate_entropy:
                     if not self.engine_config.entropy_checkpointing:
-                        entropy = verl_F.entropy_from_logits(logits)
+                        entropy = self.compute_entropy_from_logits(logits)
                     else:
-                        entropy = torch.utils.checkpoint.checkpoint(verl_F.entropy_from_logits, logits)
+                        entropy = torch.utils.checkpoint.checkpoint(self.compute_entropy_from_logits, logits)
 
                 if calculate_sum_pi_squared:
                     sum_pi_squared = verl_F.calculate_sum_pi_squared_from_logits(logits)

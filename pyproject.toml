@@ -23,6 +23,11 @@ license = {text = "Apache-2.0"}  # Changed from file to text format
 readme = {file = "README.md", content-type = "text/markdown"}
 requires-python = ">=3.10"
 
+# vLLM loads general plugins on every (TP/EngineCore) worker at startup. This one
+# reroutes Qwen3.5 GDN prefill to FlashQLA when PDB_GDN_KERNEL=flashqla; inert otherwise.
+[project.entry-points."vllm.general_plugins"]
+verl_flashqla_gdn = "verl.models.transformers.qwen3_5_flashqla:register_vllm_gdn_patch"
+
 # -------------------------------
 # tool.ruff - Linting configuration
 # -------------------------------

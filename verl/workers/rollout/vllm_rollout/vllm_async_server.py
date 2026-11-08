@@ -278,6 +278,14 @@ class vLLMHttpServer:
             **engine_kwargs,
         }
 
+        # vLLM requires reasoning_config when sampling params use thinking_token_budget.
+        val_kwargs = getattr(self.config, "val_kwargs", None)
+        needs_reasoning = self.config.get("thinking_token_budget", None) is not None or (
+            val_kwargs is not None and getattr(val_kwargs, "thinking_token_budget", None) is not None
+        )
+        if needs_reasoning and args.get("reasoning_config") is None:
+            args["reasoning_config"] = {}
+
         # update profiler args
         profiler_args = build_vllm_profiler_args(
             self.profiler_controller.config, self.profiler_controller.tool_config, self.replica_rank
